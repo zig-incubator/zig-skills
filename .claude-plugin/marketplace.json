@@ -11,7 +11,7 @@
     {
       "name": "zig-skills",
       "description": "Specialized Zig development skills for language features, Raylib, and SDL3.",
-      "source": "../",
+      "source": "./",
       "category": "development"
     }
   ]
