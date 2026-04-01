@@ -1,0 +1,20 @@
+{
+  "name": "zig-skills",
+  "version": "0.1.0",
+  "description": "Claude Code plugin for Zig development, covering language patterns, Raylib, and SDL3 bindings.",
+  "author": {
+    "name": "rudedogg",
+    "url": "https://github.com/rudedogg"
+  },
+  "repository": "https://github.com/rudedogg/zig-skills",
+  "homepage": "https://github.com/rudedogg/zig-skills",
+  "license": "Apache-2.0",
+  "keywords": [
+    "zig",
+    "raylib",
+    "sdl3",
+    "claude-code",
+    "skill",
+    "gamedev"
+  ]
+}
