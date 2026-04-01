@@ -3,11 +3,11 @@
   "version": "0.1.0",
   "description": "Claude Code plugin for Zig development, covering language patterns, Raylib, and SDL3 bindings.",
   "author": {
-    "name": "rudedogg",
-    "url": "https://github.com/rudedogg"
+    "name": "zig-incubator",
+    "url": "https://github.com/zig-incubator"
   },
-  "repository": "https://github.com/rudedogg/zig-skills",
-  "homepage": "https://github.com/rudedogg/zig-skills",
+  "repository": "https://github.com/zig-incubator/zig-skills",
+  "homepage": "https://github.com/zig-incubator/zig-skills",
   "license": "Apache-2.0",
   "keywords": [
     "zig",
