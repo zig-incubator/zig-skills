@@ -1,6 +1,6 @@
-# Zig 0.15.x Agent Skill
+# Zig Agent Skill
 
-An [Agent Skill](https://agentskills.io/) for the Zig programming language, targeting version 0.15.x.
+An [Agent Skill](https://agentskills.io/) for the Zig programming language, currently targeting version 0.16.0.
 
 ## Why This Exists
 
@@ -8,12 +8,13 @@ LLMs struggle with Zig more than languages like TypeScript or Swift. The languag
 
 ## What's Included
 
-- **SKILL.md**: 357 lines covering critical patterns and common mistakes
-- **references/**: 51 files totaling ~21,500 lines of documentation
-  - Standard library module documentation
-  - Idiomatic patterns (from [Zig Code Patterns](https://ziggit.dev/t/code-patterns/1748))
-  - Build system guidance
-  - Language reference content
+- **SKILL.md**: Core patterns and critical breaking changes for Zig 0.16.0
+- **references/**: 50+ files of comprehensive documentation
+  - Standard library module documentation (std.Io, std.heap, std.fs, etc.)
+  - Idiomatic patterns extracted from the Zig standard library
+  - Build system guidance (build.zig, modules, dependencies)
+  - Language reference content (comptime, builtins, error handling)
+  - Code review checklist with migration examples
 
 ## How It Was Made
 
@@ -21,13 +22,19 @@ Generated using Claude Opus 4.5 with the Zig standard library source code as con
 
 The methodology prioritizes grounding the model in real source code rather than hallucinated documentation.
 
+**Updated for 0.16.0**: The documentation has been updated to reflect major breaking changes including:
+- Complete rewrite of `std.Io` interface with async/await support
+- Thread-safe ArenaAllocator (ThreadSafe wrapper removed)
+- Removed types: GenericReader, AnyReader, FixedBufferStream, Thread.Pool
+- New concurrent operations via `std.Io.concurrent()`
+
 See https://austinrude.com/blog/making-a-zig-agent-skill/ for details.
 
 ## Usage
 
 ### Install as a Plugin
 
-After the Claude Code is installed, you can install this skill as a plugin:
+After Claude Code is installed, you can install this skill as a plugin:
 
 ```bash
 /plugin marketplace add zig-incubator/zig-skills
@@ -38,14 +45,43 @@ After the Claude Code is installed, you can install this skill as a plugin:
 
 Alternatively, install the `zig` directory into `~/.claude/skills/` per [Claude Code skill documentation](https://docs.anthropic.com/en/docs/claude-code/skills).
 
-Example prompt:
+### Example Prompts
+
 ```
-Using the zig skill please review @src/ and help me improve the codebase.
+Using the zig skill, review @src/main.zig for idiomatic patterns
 ```
+
+```
+Help me set up a build.zig for a project with multiple modules
+```
+
+```
+Explain how to use the new std.Io async interface in 0.16.0
+```
+
+```
+Review my allocator usage and suggest improvements
+```
+
+## What This Skill Helps With
+
+- Avoiding deprecated syntax and removed features from older Zig versions
+- Writing idiomatic Zig code following standard library patterns
+- Understanding the new `std.Io` interface and async/await patterns
+- Proper allocator selection and naming conventions
+- Build system configuration with modules and dependencies
+- Error handling best practices (try/catch/errdefer)
+- Comptime metaprogramming and type reflection
 
 ## Feedback
 
-Please [open an issue](https://github.com/rudedogg/zig-skill/issues) if you find any hallucinations, inaccuracies, or outdated patterns. No need to write a detailed report with a fix—just knowing about the problem helps improve the skill.
+Please [open an issue](https://github.com/zig-incubator/zig-skills/issues) if you find any hallucinations, inaccuracies, or outdated patterns. No need to write a detailed report with a fix—just knowing about the problem helps improve the skill.
+
+## Attribution
+
+This skill is a fork of the original [zig-skill](https://github.com/rudedogg/zig-skill) by [Austin Rude](https://github.com/rudedogg). The initial documentation was generated using his methodology with the Zig standard library source code as context.
+
+This fork is maintained independently and has been updated for Zig 0.16.0.
 
 ## Specification
 
