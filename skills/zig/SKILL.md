@@ -1,13 +1,13 @@
 ---
 name: zig
-description: Up-to-date Zig programming language patterns for version 0.15.x. Use when writing, reviewing, or debugging Zig code, working with build.zig and build.zig.zon files, or using comptime metaprogramming. Critical for avoiding outdated patterns from training data - especially build system APIs (root_module instead of root_source_file), I/O APIs (buffered writer pattern), container initialization (.empty/.init), allocator selection (DebugAllocator), and removed language features (async/await, usingnamespace).
+description: Up-to-date Zig programming language patterns for version 0.16.0. Use when writing, reviewing, or debugging Zig code, working with build.zig and build.zig.zon files, or using comptime metaprogramming. Critical for avoiding outdated patterns from training data - especially I/O interface (std.Io), build system APIs (root_module), container initialization (.empty/.init), allocator selection (DebugAllocator), and async/await patterns.
 ---
 
-# Zig Language Reference (v0.15.2)
+# Zig Language Reference (v0.16.0)
 
 Zig evolves rapidly. Training data contains outdated patterns that cause compilation errors. This skill documents breaking changes and correct modern patterns.
 
-## Critical: Removed Features (0.15.x)
+## Critical: Removed Features (0.16.0)
 
 ### `usingnamespace` - REMOVED
 ```zig
@@ -19,68 +19,94 @@ const other = @import("other.zig");
 pub const foo = other.foo;
 ```
 
-### `async`/`await` - REMOVED
-Keywords removed from language. Async I/O support is planned for future releases.
+### `GenericReader`, `AnyReader`, `FixedBufferStream` - REMOVED (0.16.0)
+These I/O types have been removed in favor of the new `std.Io` interface.
 
-## Critical: I/O API Rewrite ("Writergate")
+### `async`/`await` - REMOVED then RESTORED
+Keywords were removed from language in earlier versions but are now available again through `std.Io` interface.
 
-The entire `std.io` API changed. New `std.Io.Writer` and `std.Io.Reader` are **non-generic** with buffer in the interface.
+## Critical: I/O Interface (0.16.0)
 
-### Writing
+Zig 0.16.0 introduces a complete rewrite of the I/O system using interfaces. The new `std.Io` provides async/await, concurrent operations, and multiple implementations.
+
+### Setting Up I/O
+
 ```zig
-// WRONG - old API
-const stdout = std.io.getStdOut().writer();
-try stdout.print("Hello\n", .{});
+const std = @import("std");
+const Io = std.Io;
 
-// CORRECT - new API: provide buffer, access .interface, flush
-var buf: [4096]u8 = undefined;
-var stdout_writer = std.fs.File.stdout().writer(&buf);
-const stdout = &stdout_writer.interface;
-try stdout.print("Hello\n", .{});
-try stdout.flush();  // REQUIRED!
-```
+pub fn main() !void {
+    // Set up allocator
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    defer debug_allocator.deinit();
+    const gpa = debug_allocator.allocator();
 
-### Reading
-```zig
-// Reading from file
-var buf: [4096]u8 = undefined;
-var file_reader = file.reader(&buf);
-const r = &file_reader.interface;
+    // Set up I/O implementation (choose one)
+    var threaded: std.Io.Threaded = .init(gpa);
+    defer threaded.deinit();
+    const io = threaded.io();
 
-// Read line by line (takeDelimiter returns null at EOF)
-while (try r.takeDelimiter('\n')) |line| {
-    // process line (doesn't include '\n')
+    // Use I/O operations
+    try doWork(io);
 }
 
-// Read binary data
-const header = try r.takeStruct(Header, .little);
-const value = try r.takeInt(u32, .big);
+fn doWork(io: Io) !void {
+    std.debug.print("working\n", .{});
+    io.sleep(.fromSeconds(1), .awake) catch {};
+}
 ```
 
-### Fixed Buffer Writer (no file)
+### Async/Await Support
+
+Async/await is back in Zig 0.16.0 with the new I/O interface:
+
 ```zig
-var buf: [256]u8 = undefined;
-var w: std.Io.Writer = .fixed(&buf);
-try w.print("Hello {s}", .{"world"});
-const result = w.buffered();  // "Hello world"
+fn doAsyncWork(io: Io) !void {
+    var future = io.async(someTask, .{io});
+    try future.await(io);
+}
+
+fn someTask(io: Io) !void {
+    std.debug.print("async task\n", .{});
+    io.sleep(.fromSeconds(1), .awake) catch {};
+}
 ```
 
-### Fixed Reader (from slice)
+### Concurrent Operations
+
+For true parallelism:
+
 ```zig
-var r: std.Io.Reader = .fixed("hello\nworld");
-const line = (try r.takeDelimiter('\n')).?;  // "hello" (returns null at EOF)
+fn doConcurrentWork(io: Io) !void {
+    var task1 = try io.concurrent(taskA, .{io});
+    var task2 = try io.concurrent(taskB, .{io});
+    
+    try task1.await(io);
+    try task2.await(io);
+}
+
+fn taskA(io: Io) !void {
+    io.sleep(.fromSeconds(1), .awake) catch {};
+}
+
+fn taskB(io: Io) !void {
+    io.sleep(.fromSeconds(1), .awake) catch {};
+}
 ```
 
-**Deprecated:** `BufferedWriter`, `CountingWriter`, `std.io.bufferedWriter()`
+### File I/O with New Interface
 
-**Deprecated:** `GenericWriter`, `GenericReader`, `AnyWriter`, `AnyReader`, `FixedBufferStream`
+```zig
+fn readFile(io: Io, path: []const u8) ![]u8 {
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+    
+    // New allocation function
+    return file.readToEndAlloc(gpa, 1024 * 1024);
+}
+```
 
-**New:** `std.Io.Writer`, `std.Io.Reader` - non-generic, buffer in interface
-
-**Replacements:**
-- `CountingWriter` → `std.Io.Writer.Discarding` (has `.fullCount()`)
-- `BufferedWriter` → buffer provided to `.writer(&buf)` call
-- Allocating output → `std.Io.Writer.Allocating`
+**Note:** Old buffered I/O patterns from 0.15.x are deprecated. Use the new `std.Io` interface instead.
 
 ## Critical: Build System (0.15.x)
 
@@ -175,6 +201,50 @@ pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void
 
 ## Breaking Changes (0.14.0+)
 
+### Arena Allocator is Now Thread-Safe
+```zig
+// 0.15.x: ArenaAllocator was not thread-safe
+// 0.16.0: ArenaAllocator is now thread-safe and lock-free by default
+
+var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+defer arena.deinit();
+// Safe to use from multiple threads
+```
+
+### ThreadSafe Allocator Removed
+```zig
+// WRONG - 0.15.x pattern
+const thread_safe = std.heap.ThreadSafe.allocator();
+
+// CORRECT - 0.16.0: use ArenaAllocator (now thread-safe) or SmpAllocator
+var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+defer arena.deinit();
+const allocator = arena.allocator();
+```
+
+### Thread.Pool Removed
+```zig
+// WRONG - 0.15.x pattern
+var pool: std.Thread.Pool = .init(...);
+
+// CORRECT - 0.16.0: use std.Io concurrent operations
+var threaded: std.Io.Threaded = .init(gpa);
+defer threaded.deinit();
+const io = threaded.io();
+var task = try io.concurrent(doWork, .{io});
+```
+
+### File.Stat.access_time is Now Optional
+```zig
+// 0.15.x: access_time was always present
+// 0.16.0: access_time is optional (may be null)
+
+const stat = try file.stat();
+if (stat.access_time) |atime| {
+    // Access time is available
+}
+```
+
 ### `@branchHint` replaces `@setCold`
 ```zig
 // WRONG
@@ -255,6 +325,9 @@ switch (value) {
 | `posix.sendfile` | Removed — use `std.fs.File` writer `.sendFileAll()` |
 | `std.fmt.Formatter` | Deprecated — renamed to `std.fmt.Alt` |
 | `fmtSliceEscapeLower`/`Upper` | Use `std.ascii.hexEscape(bytes, .lower/.upper)` |
+| `GenericReader`, `AnyReader`, `FixedBufferStream` | Removed — use `std.Io.Reader`/`Writer` interface |
+| `ThreadSafe` allocator | Removed — use `ArenaAllocator` (now thread-safe) or `SmpAllocator` |
+| `Thread.Pool` | Removed — use `std.Io.concurrent()` for parallel work |
 
 ## Language References
 

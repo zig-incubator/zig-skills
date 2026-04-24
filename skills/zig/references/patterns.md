@@ -1,16 +1,80 @@
 # Zig Patterns Reference
 
-Comprehensive patterns for writing idiomatic Zig code. This reference contains best practices extracted from the Zig standard library (0.15.x) and established community idioms.
+Comprehensive patterns for writing idiomatic Zig code. This reference contains best practices extracted from the Zig standard library (0.16.0) and established community idioms.
 
 ## Table of Contents
 
 ### Quick Patterns
 - [Memory and Allocators](#memory-and-allocators)
-- [File I/O (0.15.x)](#file-io-015x)
-- [HTTP Client (0.15.x)](#http-client-015x)
+- [File I/O (0.16.x)](#file-io-016x)
+- [HTTP Client (0.16.x)](#http-client-016x)
 - [JSON](#json)
 - [Testing](#testing)
 - [Build System Patterns](#build-system-patterns)
+
+### Async Operation Patterns (0.16.0)
+
+#### Basic Async Pattern
+Use `io.async()` to decouple function calling from function returning.
+
+```zig
+fn asyncOperation(io: std.Io, data: []const u8) !void {
+    std.debug.print("Async operation: {s}\n", .{data});
+    io.sleep(.fromSeconds(1), .awake) catch {};
+}
+
+fn doAsyncWork(io: std.Io) !void {
+    var task = io.async(asyncOperation, .{ io, "example" });
+    defer task.cancel(io) catch {};
+    
+    // Do other work while task runs
+    try task.await(io);  // Wait for completion
+}
+```
+
+#### Concurrent Pattern
+For true parallelism, use `io.concurrent()`.
+
+```zig
+fn concurrentTask(io: std.Io, id: u32) !void {
+    io.sleep(.fromSeconds(id * 0.5), .awake) catch {};
+    std.debug.print("Task {} completed\n", .{id});
+}
+
+fn doConcurrentWork(io: std.Io) !void {
+    var tasks = try std.ArrayList(std.Io.ConcurrentTask).initCapacity(
+        io.allocator(), 3);
+    defer tasks.deinit();
+    
+    for (0..3) |i| {
+        tasks.appendAssumeCapacity(try io.concurrent(concurrentTask, .{ io, i }));
+    }
+    
+    for (tasks.items) |task| {
+        task.cancel(io) catch {};
+        try task.await(io);
+    }
+}
+```
+
+#### Resource Management with Async
+Always use `defer` with `cancel` for proper resource cleanup.
+
+```zig
+fn allocAndAsync(io: std.Io, gpa: std.mem.Allocator) !void {
+    var task = io.async(allocString, .{ gpa, io, "example" });
+    defer if (task.cancel(io)) |s| gpa.free(s) else |_| {};
+    
+    const result = try task.await(io);
+    std.debug.print("Async result: {s}\n", .{result});
+}
+
+fn allocString(gpa: std.mem.Allocator, io: std.Io, data: []const u8) ![]u8 {
+    const copied = try gpa.dupe(u8, data);
+    io.sleep(.fromSeconds(1), .awake) catch {};
+    return copied;
+}
+```
 
 ### Idiomatic Code Patterns
 - [I. Syntax Patterns](#i-syntax-patterns)
@@ -70,9 +134,10 @@ defer _ = gpa.deinit();
 const allocator = gpa.allocator();
 
 // Arena (batch operations - free all at once)
+// Note: ArenaAllocator is now thread-safe in 0.16.0
 var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 defer arena.deinit();
-const allocator = arena.allocator();
+const arena_allocator = arena.allocator();  // Safe from multiple threads
 
 // Fixed buffer (no heap, stack allocation)
 var buffer: [4096]u8 = undefined;
@@ -95,7 +160,63 @@ const copy = try allocator.dupe(u8, source);
 defer allocator.free(copy);
 ```
 
-### File I/O (0.15.x)
+### File I/O (0.16.x)
+
+Zig 0.16.0 introduces a new I/O interface with async/await support. All I/O operations now use the `std.Io` interface.
+
+#### Basic I/O Setup
+```zig
+// Standard "juicy main" pattern
+pub fn main() !void {
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const gpa = debug_allocator.allocator();
+
+    var threaded: std.Io.Threaded = .init(gpa);
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    return juicyMain(gpa, io);
+}
+
+fn juicyMain(gpa: std.mem.Allocator, io: std.Io) !void {
+    // Application logic here
+}
+```
+
+#### Reading Files
+```zig
+fn readFile(io: std.Io, gpa: std.mem.Allocator, path: []const u8) ![]u8 {
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+
+    // New allocation function in 0.16.0
+    return file.readToEndAlloc(gpa, 1024 * 1024);
+}
+```
+
+#### Writing Files
+```zig
+fn writeFile(io: std.Io, path: []const u8, content: []const u8) !void {
+    const file = try std.fs.cwd().createFile(path, .{});
+    defer file.close();
+
+    try file.writeAll(content);
+}
+```
+
+#### Async Operations
+```zig
+fn asyncFileOperation(io: std.Io, gpa: std.mem.Allocator) !void {
+    var task = io.async(readFile, .{ io, gpa, "data.txt" });
+    defer task.cancel(io) catch {};
+
+    const content = try task.await(io);
+    std.debug.print("Read {} bytes\n", .{content.len});
+}
+```
+
+### File I/O (0.15.x) - DEPRECATED
 
 #### Reading Files
 ```zig
@@ -135,7 +256,34 @@ try stdout.print("Output\n", .{});
 try stdout.flush();
 ```
 
-### HTTP Client (0.15.x)
+### HTTP Client (0.16.x)
+
+Zig 0.16.0 HTTP client works with the new I/O interface.
+
+```zig
+fn fetchJson(io: std.Io, gpa: std.mem.Allocator, url: []const u8) !void {
+    var client: std.http.Client = .{ .allocator = gpa };
+    defer client.deinit();
+
+    // The response writer now takes a buffer directly
+    var body_buf: [65536]u8 = undefined;
+    var body_writer: std.io.Writer = std.io.Writer.fixed(&body_buf);
+
+    const result = try client.fetch(.{
+        .allocator = gpa,
+        .location = .{ .url = url },
+        .response_writer = &body_writer,
+    });
+
+    const body = body_writer.buffered();
+    const json = body.toOwnedSlice() catch unreachable;
+
+    defer gpa.free(json);
+    std.debug.print("Response: {s}\n", .{json});
+}
+```
+
+### HTTP Client (0.15.x) - DEPRECATED
 
 See [std-http.md](std-http.md) for full documentation including server, WebSocket, and compression.
 
@@ -207,9 +355,11 @@ test "example" {
 }
 
 test "with allocator" {
-    var list: std.ArrayListUnmanaged(u32) = .empty;
+    // Note: ArrayListUnmanaged is deprecated in 0.16.0
+    // Use ArrayList with .empty instead
+    var list: std.ArrayList(u32) = .empty;
     defer list.deinit(testing.allocator);
-    try list.append(testing.allocator, 42);
+    try list.append(42);
 }
 ```
 
@@ -279,7 +429,7 @@ b.step("test", "Run tests").dependOn(&run_tests.step);
 
 ## Idiomatic Code Patterns
 
-These patterns are extracted from the Zig standard library (0.15.x) and represent established idioms for writing clean, efficient Zig code.
+These patterns are extracted from the Zig standard library (0.16.0) and represent established idioms for writing clean, efficient Zig code.
 
 ### I. Syntax Patterns
 
@@ -316,6 +466,53 @@ pub fn spawnWg(pool: *Pool, wait_group: *WaitGroup, comptime func: anytype, args
 ```
 
 **When to use:** Thread pools, callbacks, event handlers—anywhere you need a function pointer but also need captured state.
+
+#### Async/Closure Pattern (0.16.0)
+In Zig 0.16.0, use the new I/O interface for async operations instead of thread pools.
+
+```zig
+fn asyncTask(io: std.Io, data: []const u8) !void {
+    // Simulate async work
+    io.sleep(.fromSeconds(1), .awake) catch {};
+    std.debug.print("Async task completed: {s}\n", .{data});
+}
+
+fn spawnAsyncTask(io: std.Io, data: []const u8) !void {
+    var task = io.async(asyncTask, .{ io, data });
+    defer task.cancel(io) catch {};
+    // Task runs concurrently
+}
+```
+
+**When to use:** For concurrent operations in 0.16.0 - use `io.async()` for lightweight async tasks and `io.concurrent()` for true parallelism.
+
+#### Concurrent Operations Pattern (0.16.0)
+For true parallelism, use `io.concurrent()` instead of `io.async()`.
+
+```zig
+fn producer(io: std.Io, queue: *std.Io.Queue([]const u8)) !void {
+    try queue.putOne(io, "data");
+}
+
+fn consumer(io: std.Io, queue: *std.Io.Queue([]const u8)) ![]const u8 {
+    return queue.getOne(io);
+}
+
+fn doConcurrent(io: std.Io) !void {
+    var queue: std.Io.Queue([]const u8) = .init(&.{});
+
+    var producer_task = try io.concurrent(producer, .{ io, &queue });
+    defer producer_task.cancel(io) catch {};
+
+    var consumer_task = try io.concurrent(consumer, .{ io, &queue });
+    defer consumer_task.cancel(io) catch {};
+
+    const result = try consumer_task.await(io);
+    std.debug.print("Received: {s}\n", .{result});
+}
+```
+
+**When to use:** When you need true parallelism (multiple threads executing simultaneously). Use `io.concurrent()` for producer/consumer patterns, parallel processing, or when async tasks might deadlock with single-threaded execution.
 
 #### Context Pattern
 Parameterize a generic type with *behavior*, not just data types. A context struct bundles related operations that the generic type calls at runtime, allowing callers to customize how the type operates.

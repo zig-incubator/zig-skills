@@ -1,526 +1,387 @@
-# std.io - I/O API Reference (0.15.x)
+# std.Io - I/O Interface Reference (0.16.0)
 
-New buffered I/O API introduced in Zig 0.15.x ("Writergate"). Non-generic, buffer-integrated Reader and Writer interfaces.
+Zig 0.16.0 introduces a complete rewrite of the I/O system with async/await support, concurrent operations, and a unified interface across all I/O operations.
 
 ## Table of Contents
-- [Critical Migration](#critical-migration)
-- [std.io.Writer](#stdiowriter)
-- [std.io.Reader](#stdioreader)
-- [File I/O Integration](#file-io-integration)
-- [Common Patterns](#common-patterns)
-- [Specialized Writers](#specialized-writers)
-- [Specialized Readers](#specialized-readers)
+- [Overview](#overview)
+- [Setting Up I/O](#setting-up-io)
+- [I/O Implementations](#io-implementations)
+- [Async/Await](#asyncawait)
+- [Concurrent Operations](#concurrent-operations)
+- [File System Operations](#file-system-operations)
+- [Networking](#networking)
+- [Time and Sleeping](#time-and-sleeping)
+- [Synchronization Primitives](#synchronization-primitives)
+- [Migration from 0.15.x](#migration-from-015x)
 
-## Critical Migration
+## Overview
 
-### Old API (DEPRECATED)
+The new `std.Io` interface abstracts all I/O operations and concurrency:
+- File system
+- Networking
+- Processes
+- Time and sleeping
+- Randomness
+- Async, await, concurrent, and cancel
+- Concurrent queues
+- Wait groups and select
+- Mutexes, futexes, events, and conditions
+- Memory mapped files
+
+## Setting Up I/O
+
+### Basic Setup (Threaded)
 ```zig
-// WRONG - deprecated generic writers
-const stdout = std.io.getStdOut().writer();
-try stdout.print("Hello\n", .{});
+const std = @import("std");
+const Io = std.Io;
 
-// WRONG - deprecated types
-var bw = std.io.bufferedWriter(file.writer());
-```
+pub fn main() !void {
+    // Set up allocator
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    defer std.debug.assert(debug_allocator.deinit() == .ok);
+    const gpa = debug_allocator.allocator();
 
-### New API (0.15.x)
-```zig
-// CORRECT - new buffer-integrated writer
-var buf: [4096]u8 = undefined;
-var writer = std.fs.File.stdout().writer(&buf);
-const stdout = &writer.interface;
-try stdout.print("Hello\n", .{});
-try stdout.flush();  // REQUIRED!
-```
+    // Set up I/O implementation
+    var threaded: std.Io.Threaded = .init(gpa);
+    defer threaded.deinit();
+    const io = threaded.io();
 
-**Removed Types**: `BufferedWriter`, `CountingWriter`, `GenericWriter`, `AnyWriter`, `GenericReader`, `AnyReader`, `FixedBufferStream`
-
-## std.io.Writer
-
-### Structure
-```zig
-const Writer = struct {
-    vtable: *const VTable,
-    buffer: []u8,      // Write buffer (can be zero-length for unbuffered)
-    end: usize = 0,    // Bytes buffered (0..buffer.len)
-};
-```
-
-### Core Methods
-
-#### Writing Data
-```zig
-// Write all bytes (may call drain multiple times)
-try w.writeAll("hello");
-
-// Write single byte
-try w.writeByte('\n');
-
-// Write with potential short write (returns bytes written)
-const n = try w.write(data);
-
-// Write vector of slices
-var vecs: [2][]const u8 = .{ "hello", "world" };
-try w.writeVecAll(&vecs);
-
-// Write same byte N times
-try w.splatByteAll(' ', 10);
-
-// Write same slice N times
-try w.splatBytesAll("na", 8);  // "nananananananana"
-```
-
-#### Formatted Output
-```zig
-// Format string (same syntax as before)
-try w.print("Value: {d}, Name: {s}\n", .{ 42, "test" });
-
-// Format specifiers:
-// {d}  - decimal integer
-// {x}  - hex lowercase
-// {X}  - hex uppercase
-// {s}  - string
-// {c}  - ASCII character
-// {b}  - binary
-// {o}  - octal
-// {e}  - scientific notation
-// {f}  - call .format() method on type  // NEW in 0.15.x
-// {any} - debug format
-// {?}  - optional
-// {!}  - error union
-// {*}  - pointer address
-```
-
-#### Binary Data
-```zig
-// Write integer with endianness
-try w.writeInt(u32, value, .big);
-try w.writeInt(i16, value, .little);
-
-// Write struct (extern or packed only)
-const Header = extern struct { magic: u32, version: u16 };
-try w.writeStruct(header, .little);
-
-// Write slice with endianness
-try w.writeSliceEndian(u32, values, .big);
-```
-
-#### Buffer Management
-```zig
-// Flush buffer to underlying sink
-try w.flush();
-
-// Get buffered data not yet flushed
-const pending = w.buffered();
-
-// Get writable slice for direct writes
-const dest = try w.writableSlice(len);
-@memcpy(dest, src);
-
-// Advance after writing to writableSliceGreedy
-const dest = try w.writableSliceGreedy(min_len);
-// ... write to dest ...
-w.advance(bytes_written);
-
-// Get unused capacity
-const remaining = w.unusedCapacitySlice();
-```
-
-### Fixed Buffer Writer
-```zig
-// Write to fixed buffer, error when full
-var buf: [256]u8 = undefined;
-var w: std.Io.Writer = .fixed(&buf);
-try w.print("Hello {s}\n", .{"world"});
-const result = w.buffered();  // Get written data
-```
-
-### Discarding Writer
-```zig
-// Discard all output (useful for counting bytes written)
-var buffer: [256]u8 = undefined;
-var discard: std.Io.Writer.Discarding = .init(&buffer);
-try discard.writer.print("test {d}", .{42});
-// Output discarded, but count tracked
-const bytes_written = discard.fullCount();  // includes buffered data
-```
-
-### Allocating Writer
-```zig
-// Automatically grows buffer
-var aw: std.Io.Writer.Allocating = .init(allocator);
-defer aw.deinit();
-
-try aw.writer.print("Hello {s}\n", .{"world"});
-const result = aw.writer.buffered();  // Get all written data
-
-// Or take ownership
-const owned = try aw.toOwnedSlice();
-defer allocator.free(owned);
-```
-
-## std.io.Reader
-
-### Structure
-```zig
-const Reader = struct {
-    vtable: *const VTable,
-    buffer: []u8,       // Read buffer
-    seek: usize,        // Consumed position
-    end: usize,         // Buffered data end
-};
-```
-
-### Core Methods
-
-#### Reading Bytes
-```zig
-// Read single byte
-const byte = try r.takeByte();
-const signed = try r.takeByteSigned();
-
-// Peek without consuming
-const byte = try r.peekByte();
-
-// Read exact amount
-const data = try r.take(n);      // Returns slice
-const arr = try r.takeArray(n);  // Returns *[n]u8
-
-// Read into provided buffer
-try r.readSliceAll(buffer);
-
-// Read up to buffer.len (short read OK)
-const n = try r.readSliceShort(buffer);
-```
-
-#### Line/Delimiter Reading
-```zig
-// Read until delimiter (RECOMMENDED for line reading)
-// - Consumes delimiter, returns content without it
-// - Returns null at EOF (no EndOfStream error)
-while (try r.takeDelimiter('\n')) |line| {
-    // process line (doesn't include '\n')
+    // Use I/O operations
+    try doWork(io);
 }
-// Loop ends when takeDelimiter returns null (EOF)
 
-// Read until delimiter, exclude delimiter (doesn't consume delimiter!)
-const line = try r.takeDelimiterExclusive('\n');
-// If delimiter not found: error.EndOfStream at EOF, error.StreamTooLong if buffer full
-
-// Read until delimiter, include delimiter (doesn't consume!)
-const line_with_delim = try r.takeDelimiterInclusive('\n');
-
-// Read null-terminated string (consumes null)
-const str = try r.takeSentinel(0);
-
-// Discard until delimiter (inclusive consumes delimiter)
-try r.discardDelimiterInclusive('\n');
-const n = try r.discardDelimiterExclusive('\n');  // doesn't consume delimiter
-```
-
-#### Binary Data
-```zig
-// Read integer with endianness
-const val = try r.takeInt(u32, .big);
-const val = try r.takeInt(i16, .little);
-
-// Read variable-size integer
-const val = try r.takeVarInt(u64, .big, byte_count);
-
-// Read struct (extern or packed only)
-const header = try r.takeStruct(Header, .little);
-
-// Read enum
-const e = try r.takeEnum(MyEnum, .little);
-
-// Read LEB128 encoded integer
-const val = try r.takeLeb128(i64);
-```
-
-#### Streaming
-```zig
-// Stream to writer
-const n = try r.stream(writer, .limited(1024));
-const n = try r.stream(writer, .unlimited);
-
-// Stream exact amount
-try r.streamExact(writer, exact_bytes);
-
-// Stream until delimiter
-const n = try r.streamDelimiter(writer, '\n');
-
-// Stream remaining (until EOF)
-const total = try r.streamRemaining(writer);
-```
-
-#### Buffer Management
-```zig
-// Get buffered data
-const pending = r.buffered();
-const len = r.bufferedLen();
-
-// Fill buffer with at least n bytes
-try r.fill(n);
-
-// Consume buffered bytes without reading
-r.toss(n);
-r.tossBuffered();  // Consume all buffered
-
-// Discard bytes (may read more)
-try r.discardAll(n);
-const n = try r.discardShort(max);
-const total = try r.discardRemaining();
-```
-
-#### Allocation
-```zig
-// Read remaining into allocated slice
-const data = try r.allocRemaining(allocator, .limited(max_size));
-defer allocator.free(data);
-
-// Append remaining to ArrayList
-var list: std.ArrayList(u8) = .empty;
-try r.appendRemaining(allocator, &list, .limited(max_size));
-```
-
-### Fixed Reader (from buffer)
-```zig
-// Read from existing buffer
-var r: std.Io.Reader = .fixed("hello world");
-const word = try r.takeDelimiterExclusive(' ');  // "hello"
-```
-
-### Limited Reader
-```zig
-// Limit bytes readable from underlying reader
-var limited_buf: [256]u8 = undefined;
-var limited = r.limited(.limited(1024), &limited_buf);
-// Read at most 1024 bytes from underlying reader
-```
-
-## File I/O Integration
-
-### Reading Files
-```zig
-const file = try std.fs.cwd().openFile("data.txt", .{});
-defer file.close();
-
-var buf: [4096]u8 = undefined;
-var reader = file.reader(&buf);
-const r = &reader.interface;
-
-// Read lines (takeDelimiter returns null at EOF, no error)
-while (try r.takeDelimiter('\n')) |line| {
-    // process line (does not include '\n')
-}
-// Loop ends when null returned (EOF)
-```
-
-### Writing Files
-```zig
-const file = try std.fs.cwd().createFile("out.txt", .{});
-defer file.close();
-
-var buf: [4096]u8 = undefined;
-var writer = file.writer(&buf);
-const w = &writer.interface;
-
-try w.print("Hello {s}\n", .{"world"});
-try w.writeAll("More data\n");
-try w.flush();  // REQUIRED!
-```
-
-### Stdout/Stderr
-```zig
-// Stdout
-var stdout_buf: [4096]u8 = undefined;
-var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
-const stdout = &stdout_writer.interface;
-
-try stdout.print("Output: {d}\n", .{42});
-try stdout.flush();
-
-// Stderr
-var stderr_buf: [4096]u8 = undefined;
-var stderr_writer = std.fs.File.stderr().writer(&stderr_buf);
-const stderr = &stderr_writer.interface;
-
-try stderr.print("Error: {s}\n", .{msg});
-try stderr.flush();
-```
-
-### Stdin
-```zig
-var stdin_buf: [4096]u8 = undefined;
-var stdin_reader = std.fs.File.stdin().reader(&stdin_buf);
-const stdin = &stdin_reader.interface;
-
-// takeDelimiter returns ?[]u8 (null at EOF), wrapped in error union
-const maybe_line = try stdin.takeDelimiter('\n');  // null if EOF
-if (maybe_line) |line| {
-    // process line
+fn doWork(io: Io) !void {
+    std.debug.print("working\n", .{});
+    io.sleep(.fromSeconds(1), .awake) catch {};
 }
 ```
 
-## Common Patterns
+### "Juicy Main" Pattern
+The recommended pattern for Zig applications:
 
-### Process Lines from File
 ```zig
-fn processLines(path: []const u8) !void {
+pub fn main() !void {
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    defer std.debug.assert(debug_allocator.deinit() == .ok);
+    const gpa = debug_allocator.allocator();
+
+    var threaded: std.Io.Threaded = .init(gpa);
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    return juicyMain(gpa, io);
+}
+
+fn juicyMain(gpa: std.mem.Allocator, io: Io) !void {
+    // Application logic here
+}
+```
+
+## I/O Implementations
+
+### std.Io.Threaded
+Thread-based I/O implementation. Works on all platforms.
+
+```zig
+var threaded: std.Io.Threaded = .init(gpa);
+defer threaded.deinit();
+const io = threaded.io();
+
+// Optionally limit concurrency
+threaded.cpu_count = 1;  // Single thread
+```
+
+### std.Io.Evented (Platform-Specific)
+Event-driven I/O using platform-specific mechanisms:
+
+```zig
+pub const Evented = if (fiber.supported) switch (builtin.os.tag) {
+    .linux => Uring,           // io_uring
+    .dragonfly, .freebsd, .netbsd, .openbsd => Kqueue,
+    .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => Dispatch,
+    else => void,
+} else void;
+```
+
+### std.Io.Uring (Linux)
+Linux io_uring implementation for high-performance async I/O.
+
+### std.Io.Kqueue (BSD/macOS)
+Kqueue-based event system for BSD and macOS.
+
+### std.Io.Dispatch (Apple platforms)
+Grand Central Dispatch-based implementation for Apple platforms.
+
+## Async/Await
+
+### Basic Async
+Decouple function calling from function returning:
+
+```zig
+fn juicyMain(gpa: Allocator, io: Io) !void {
+    var future = io.async(doWork, .{io});
+    try future.await(io);
+}
+
+fn doWork(io: Io) !void {
+    std.debug.print("working\n", .{});
+    io.sleep(.fromSeconds(1), .awake) catch {};
+}
+```
+
+### Multiple Concurrent Tasks
+```zig
+fn juicyMain(gpa: Allocator, io: Io) !void {
+    var a = io.async(doWork, .{ io, "task A" });
+    var b = io.async(doWork, .{ io, "task B" });
+
+    try a.await(io);
+    try b.await(io);
+}
+
+fn doWork(io: Io, name: []const u8) !void {
+    std.debug.print("working on {s}\n", .{name});
+    io.sleep(.fromSeconds(1), .awake) catch {};
+}
+```
+
+### Error Handling with Cancellation
+Use `defer` with `cancel` for proper resource cleanup:
+
+```zig
+fn juicyMain(gpa: Allocator, io: Io) !void {
+    var a = io.async(doWork, .{ gpa, io, "task A" });
+    defer a.cancel(io) catch {};
+
+    var b = io.async(doWork, .{ gpa, io, "task B" });
+    defer b.cancel(io) catch {};
+
+    try a.await(io);
+    try b.await(io);
+}
+```
+
+### Resource Management
+Handle allocated return values properly:
+
+```zig
+fn juicyMain(gpa: Allocator, io: Io) !void {
+    var a = io.async(allocString, .{ gpa, io, "task A" });
+    defer if (a.cancel(io)) |s| gpa.free(s) else |_| {};
+
+    var b = io.async(allocString, .{ gpa, io, "task B" });
+    defer if (b.cancel(io)) |s| gpa.free(s) else |_| {};
+
+    const a_string = try a.await(io);
+    const b_string = try b.await(io);
+    std.debug.print("finished {s}\n", .{a_string});
+    std.debug.print("finished {s}\n", .{b_string});
+}
+
+fn allocString(gpa: Allocator, io: Io, name: []const u8) ![]u8 {
+    const copied = try gpa.dupe(u8, name);
+    std.debug.print("working {s}\n", .{copied});
+    io.sleep(.fromSeconds(1), .awake) catch {};
+    return copied;
+}
+```
+
+## Concurrent Operations
+
+### Asynchrony vs Concurrency
+- **Asynchrony** (`io.async`): Decouple call from return, but may not provide parallelism
+- **Concurrency** (`io.concurrent`): Explicitly requests parallel execution
+
+```zig
+// WRONG: async may deadlock with single thread
+var task1 = io.async(producer, .{io, &queue, "data"});
+var task2 = io.async(consumer, .{io, &queue});
+
+// CORRECT: concurrent ensures parallelism
+var task1 = try io.concurrent(producer, .{io, &queue, "data"});
+var task2 = try io.concurrent(consumer, .{io, &queue});
+```
+
+### Concurrency with Error Handling
+```zig
+fn doConcurrent(io: Io) !void {
+    var queue: Io.Queue([]const u8) = .init(&.{});
+
+    var producer_task = try io.concurrent(producer, .{ io, &queue, "message" });
+    defer producer_task.cancel(io) catch {};
+
+    var consumer_task = try io.concurrent(consumer, .{ io, &queue });
+    defer _ = consumer_task.cancel(io) catch {};
+
+    const result = try consumer_task.await(io);
+    std.debug.print("received: {s}\n", .{result});
+}
+
+fn producer(io: Io, queue: *Io.Queue([]const u8), msg: []const u8) !void {
+    try queue.putOne(io, msg);
+}
+
+fn consumer(io: Io, queue: *Io.Queue([]const u8)) ![]const u8 {
+    return queue.getOne(io);
+}
+```
+
+## File System Operations
+
+### File Reading
+```zig
+fn readFile(io: Io, gpa: std.mem.Allocator, path: []const u8) ![]u8 {
     const file = try std.fs.cwd().openFile(path, .{});
     defer file.close();
 
-    var buf: [8192]u8 = undefined;
-    var reader = file.reader(&buf);
-    const r = &reader.interface;
+    // New allocation function in 0.16.0
+    return file.readToEndAlloc(gpa, 1024 * 1024);
+}
+```
 
-    // takeDelimiter returns null at EOF (not EndOfStream error)
-    while (try r.takeDelimiter('\n')) |line| {
-        std.debug.print("Line: {s}\n", .{line});
+### Directory Operations
+```zig
+fn listDirectory(io: Io) !void {
+    var dir = try std.fs.cwd().openDir("src", .{ .iterate = true });
+    defer dir.close();
+
+    var iter = dir.iterate();
+    while (try iter.next()) |entry| {
+        std.debug.print("{s}\n", .{entry.name});
     }
 }
 ```
 
-### Copy File
+### File.Stat with Optional access_time
 ```zig
-fn copyFile(src_path: []const u8, dst_path: []const u8) !void {
-    const src = try std.fs.cwd().openFile(src_path, .{});
-    defer src.close();
+const stat = try file.stat();
+std.debug.print("size: {}\n", .{stat.size});
 
-    const dst = try std.fs.cwd().createFile(dst_path, .{});
-    defer dst.close();
-
-    var read_buf: [4096]u8 = undefined;
-    var reader = src.reader(&read_buf);
-
-    var write_buf: [4096]u8 = undefined;
-    var writer = dst.writer(&write_buf);
-
-    _ = try reader.interface.streamRemaining(&writer.interface);
-    try writer.interface.flush();
+// access_time is now optional
+if (stat.access_time) |atime| {
+    std.debug.print("access time: {}\n", .{atime});
 }
 ```
 
-### Parse Binary Header
+## Networking
+
+### TCP Connection
 ```zig
-const FileHeader = extern struct {
-    magic: [4]u8,
-    version: u16,
-    flags: u32,
-    data_offset: u64,
-};
+fn connectToServer(io: Io, gpa: std.mem.Allocator) !void {
+    const addr = try std.net.Address.resolveIp("127.0.0.1", 8080);
+    const stream = try std.net.tcpConnectToAddress(addr);
+    defer stream.close();
 
-fn parseHeader(file: std.fs.File) !FileHeader {
-    var buf: [128]u8 = undefined;
-    var reader = file.reader(&buf);
-    const r = &reader.interface;
-
-    const header = try r.takeStruct(FileHeader, .little);
-    if (!std.mem.eql(u8, &header.magic, "MYFT")) {
-        return error.InvalidMagic;
-    }
-    return header;
+    // Use I/O operations with the stream
 }
 ```
 
-### Build String with Allocating Writer
+## Time and Sleeping
+
+### Basic Sleep
 ```zig
-fn buildMessage(allocator: Allocator, items: []const Item) ![]u8 {
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    errdefer aw.deinit();
-    const w = &aw.writer;
+fn sleepExample(io: Io) void {
+    // Sleep for 1 second
+    io.sleep(.fromSeconds(1), .awake) catch {};
 
-    try w.writeAll("Items:\n");
-    for (items, 0..) |item, i| {
-        try w.print("  {d}. {s}\n", .{ i + 1, item.name });
-    }
-
-    return aw.toOwnedSlice();
+    // Sleep for 500 milliseconds
+    io.sleep(.fromMillis(500), .awake) catch {};
 }
 ```
 
-### Streaming JSON to File
+### Timestamps
 ```zig
-fn writeJson(file: std.fs.File, data: anytype) !void {
-    var buf: [4096]u8 = undefined;
-    var writer = file.writer(&buf);
-    const w = &writer.interface;
+fn timestampExample(io: Io) !void {
+    const timestamp = io.now();
+    std.debug.print("timestamp: {}\n", .{timestamp});
 
-    try std.json.stringify(data, .{}, w);
-    try w.writeByte('\n');
-    try w.flush();
+    const duration = std.Io.Duration.fromSeconds(10);
+    // ... work ...
+    const elapsed = std.Io.Timestamp.since(io.now(), timestamp);
 }
 ```
 
-## Specialized Writers
+## Synchronization Primitives
 
-### Writer.Hashed
-Wraps a writer to compute hash of written data.
+### Queue
+Unbuffered queue for producer/consumer patterns:
+
 ```zig
-var hash_buf: [64]u8 = undefined;
-var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-var hashed = writer.hashed(&hasher, &hash_buf);
-const w = &hashed.writer;
+var queue: Io.Queue(Message) = .init(&.{});
 
-try w.writeAll("data to hash");
+// Producer
+try queue.putOne(io, message);
+
+// Consumer
+const msg = try queue.getOne(io);
+```
+
+### RwLock
+```zig
+var lock: Io.RwLock = .{};
+
+// Read lock
+lock.lockShared();
+defer lock.unlockShared();
+
+// Write lock
+lock.lock();
+defer lock.unlock();
+```
+
+### Semaphore
+```zig
+var sem: Io.Semaphore = .init(3);  // 3 permits
+
+// Acquire
+try sem.wait();
+defer sem.post();
+```
+
+## Migration from 0.15.x
+
+### Removed Types
+- `GenericReader`, `GenericWriter` → Use `std.Io.Reader`, `std.Io.Writer`
+- `AnyReader`, `AnyWriter` → Use interface types
+- `FixedBufferStream` → Use `std.Io.Reader.fixed()`, `std.Io.Writer.fixed()`
+- `BufferedWriter`, `BufferedReader` → Buffer is now in the interface
+
+### File I/O Migration
+```zig
+// OLD (0.15.x)
+var buf: [4096]u8 = undefined;
+var writer = file.writer(&buf);
+const w = &writer.interface;
+try w.print("Hello\n", .{});
 try w.flush();
 
-var digest: [32]u8 = undefined;
-hashed.hasher.final(&digest);
+// NEW (0.16.0) - Use std.Io interface
+var threaded: std.Io.Threaded = .init(gpa);
+defer threaded.deinit();
+const io = threaded.io();
+// File operations now integrated with I/O interface
 ```
 
-## Specialized Readers
-
-### Reader.Hashed
-Wraps a reader to compute hash of read data.
+### Allocator Changes
 ```zig
-var hash_buf: [64]u8 = undefined;
-var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-var hashed = reader.hashed(&hasher, &hash_buf);
-const r = &hashed.reader;
+// OLD (0.15.x)
+const thread_safe = std.heap.ThreadSafe.allocator();
 
-const data = try r.take(100);
-// hasher updated with read data
-
-var digest: [32]u8 = undefined;
-hashed.hasher.final(&digest);
+// NEW (0.16.0)
+var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+defer arena.deinit();
+const allocator = arena.allocator();  // Now thread-safe by default
 ```
 
-### Reader.Limited
-Limits bytes readable from underlying reader.
+### Thread Pool Replacement
 ```zig
-var limited_buf: [256]u8 = undefined;
-var limited = underlying_reader.limited(.limited(1024), &limited_buf);
-// Can only read up to 1024 bytes total
-```
+// OLD (0.15.x)
+var pool: std.Thread.Pool = undefined;
+try pool.init(.{ .allocator = gpa, .n_jobs = 4 });
 
-## Error Types
-
-### Writer Errors
-```zig
-std.Io.Writer.Error = error{WriteFailed};
-```
-
-### Reader Errors
-```zig
-std.Io.Reader.Error = error{ReadFailed, EndOfStream};
-std.Io.Reader.StreamError = error{ReadFailed, WriteFailed, EndOfStream};
-std.Io.Reader.DelimiterError = error{ReadFailed, EndOfStream, StreamTooLong};
-```
-
-## std.io.Limit
-
-Used to specify byte limits for streaming operations.
-```zig
-const Limit = enum(usize) {
-    nothing = 0,
-    unlimited = std.math.maxInt(usize),
-    _,
-
-    pub fn limited(n: usize) Limit;
-    pub fn limited64(n: u64) Limit;
-    pub fn min(a: Limit, b: Limit) Limit;
-    pub fn toInt(l: Limit) ?usize;  // null for unlimited
-    pub fn subtract(l: Limit, amount: usize) ?Limit;
-};
+// NEW (0.16.0)
+var threaded: std.Io.Threaded = .init(gpa);
+defer threaded.deinit();
+const io = threaded.io();
+var task = try io.concurrent(doWork, .{io});
 ```

@@ -1,23 +1,24 @@
-# std.heap - Allocators
+# std.heap - Allocators (0.16.0)
 
 Zig has no default allocator. Functions that need heap memory accept an `Allocator` parameter.
 
 ## Quick Reference
 
-| Allocator | Use Case | Thread-Safe |
-|-----------|----------|-------------|
-| `std.testing.allocator` | Unit tests (leak detection) | No |
-| `std.heap.FixedBufferAllocator` | Stack-based, bounded size known | Optional |
-| `std.heap.ArenaAllocator` | Batch free, CLI apps, request handlers | No |
-| `std.heap.page_allocator` | Backing for other allocators | Yes |
-| `std.heap.c_allocator` | Linking libc, interop | Yes |
-| `std.heap.raw_c_allocator` | Libc arena backing (no alignment overhead) | Yes |
-| `std.heap.DebugAllocator` | Debug builds, leak/corruption detection | Configurable |
-| `std.heap.smp_allocator` | ReleaseFast production multithreaded | Yes |
-| `std.heap.MemoryPool` | High-frequency same-type allocations | No |
-| `std.heap.ThreadSafeAllocator` | Wrap non-thread-safe allocator | Yes |
-| `std.heap.StackFallbackAllocator` | Stack buffer with heap fallback | Depends |
-| `std.heap.wasm_allocator` | WebAssembly targets | Yes |
+| Allocator | Use Case | Thread-Safe | Notes |
+|-----------|----------|-------------|-------|
+| `std.testing.allocator` | Unit tests (leak detection) | No | |
+| `std.heap.FixedBufferAllocator` | Stack-based, bounded size known | Optional | |
+| `std.heap.ArenaAllocator` | Batch free, CLI apps, request handlers | **Yes** (0.16.0) | Now thread-safe by default |
+| `std.heap.page_allocator` | Backing for other allocators | Yes | |
+| `std.heap.c_allocator` | Linking libc, interop | Yes | |
+| `std.heap.raw_c_allocator` | Libc arena backing (no alignment overhead) | Yes | |
+| `std.heap.DebugAllocator` | Debug builds, leak/corruption detection | Configurable | |
+| `std.heap.SmpAllocator` | ReleaseFast production multithreaded | Yes | |
+| `std.heap.MemoryPool` | High-frequency same-type allocations | No | |
+| `std.heap.StackFallbackAllocator` | Stack buffer with heap fallback | Depends | |
+| `std.heap.wasm_allocator` | WebAssembly targets | Yes | |
+
+**Note:** `ThreadSafe` allocator was removed in 0.16.0. ArenaAllocator is now thread-safe by default.
 
 ## Allocator Naming Conventions
 
@@ -28,6 +29,8 @@ Using a generic `allocator` name hides memory ownership contracts. Name allocato
 | `gpa` | Caller **must** free with `defer gpa.free()` | Yes |
 | `arena` | Bulk-deallocated at system boundary | Yes |
 | `scratch` | Function-private temporary space | **Never** |
+
+**Note:** ArenaAllocator is now thread-safe in 0.16.0, no need for ThreadSafe wrapper.
 
 ### The Problem
 
@@ -87,6 +90,7 @@ fn handleRequest(
 **CLI applications** - arena for everything, freed at exit:
 ```zig
 pub fn main() !void {
+    // 0.16.0: ArenaAllocator is now thread-safe
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     try run(arena.allocator());  // Name as "arena" - bulk freed at end
@@ -200,6 +204,8 @@ if (fba.ownsSlice(slice)) { ... } // Check if slice is within buffer
 
 ### ArenaAllocator
 
+**Important change in 0.16.0:** ArenaAllocator is now thread-safe and lock-free by default. No need for ThreadSafe wrapper.
+
 Wraps a child allocator. Allocate many times, free all at once with `.deinit()`. Individual `free()` only works for most recent allocation:
 
 ```zig
@@ -284,6 +290,8 @@ const data = try allocator.alloc(u8, 1000);
 allocator.free(data);
 ```
 
+**Note:** In 0.16.0, this is the recommended allocator for production multithreaded code.
+
 ### C Allocator
 
 Alternative when `smp_allocator` is not available. Requires linking libc (`-lc`):
@@ -334,18 +342,28 @@ var pool = std.heap.MemoryPoolAligned(T, .@"64").init(allocator);
 var pool = try std.heap.MemoryPoolExtra(T, .{ .growable = false }).initPreheated(allocator, 50);
 ```
 
-### ThreadSafeAllocator
+### ThreadSafeAllocator - REMOVED (0.16.0)
 
-Wraps any allocator with mutex for thread safety:
+**Removed in 0.16.0** - no longer needed because:
+1. ArenaAllocator is now thread-safe by default
+2. All other allocators that need thread safety now have it built-in
 
+**Old pattern (0.15.x):**
 ```zig
 var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-defer arena.deinit();
 
 var ts = std.heap.ThreadSafeAllocator{
     .child_allocator = arena.allocator(),
 };
 const allocator = ts.allocator();  // Safe to use from multiple threads
+```
+
+**New pattern (0.16.0):**
+```zig
+// ArenaAllocator is now thread-safe by default
+var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+defer arena.deinit();
+const allocator = arena.allocator();  // Safe to use from multiple threads
 ```
 
 ### StackFallbackAllocator
@@ -494,7 +512,7 @@ fn process(allocator: Allocator) void {
 }
 ```
 
-## Initialization (0.15.x)
+## Initialization (0.16.0)
 
 Use `.init` not `.{}`:
 
@@ -505,6 +523,12 @@ var gpa: std.heap.DebugAllocator(.{}) = .{};
 // CORRECT
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 ```
+
+## Thread Safety Changes (0.16.0)
+
+- **ArenaAllocator** is now thread-safe and lock-free by default
+- **ThreadSafeAllocator** wrapper has been removed (no longer needed)
+- All allocators that need thread safety now have it built-in
 
 ## Debugging Memory Issues
 

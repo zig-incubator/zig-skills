@@ -1,4 +1,4 @@
-# Zig Code Review Reference (0.15.x)
+# Zig Code Review Reference (0.16.0)
 
 Systematic code review checklist organized by detection confidence level. Work through sections in order: ALWAYS FLAG → FLAG WITH CONTEXT → SUGGEST.
 
@@ -14,11 +14,13 @@ Systematic code review checklist organized by detection confidence level. Work t
 
 | Detect | Issue | Risk | Fix |
 |--------|-------|------|-----|
-| `writer(&buf)` without `.flush()` | Missing flush | Data loss | Add `try w.flush()` |
+| `writer(&buf)` or `reader(&buf)` | Deprecated pattern | Compile error | Use `std.Io` interface |
 | `.{}` on container type | Wrong init | Compile error | Use `.empty` or `.init` |
 | `root_source_file` in build.zig | Old build API | Compile error | Use `root_module = b.createModule(...)` |
 | `"{}"` with custom format method | Old format spec | Compile error | Use `"{f}"` (see [1.4](#14-api-signature-changes)) |
 | `getOrPut` then `ensure*` | Exception safety | Orphan entries | Reserve first, mutate with `*AssumeCapacity` |
+| `ThreadSafe` allocator | Removed type | Compile error | Use ArenaAllocator (now thread-safe) |
+| `Thread.Pool` | Removed type | Compile error | Use `std.Io.concurrent()` |
 
 ### Guaranteed Bug Patterns
 
@@ -80,16 +82,22 @@ Systematic code review checklist organized by detection confidence level. Work t
 
 Objective errors that cause compilation failures or guaranteed runtime bugs.
 
-### 1.1 Removed Language Features
+### 1.1 Removed Language Features (0.16.0)
 
 | Detect | Replacement | Risk |
 |--------|-------------|------|
 | `usingnamespace` | Explicit re-exports | Compile error |
-| `async`/`await` keywords | Removed entirely | Compile error |
+| `GenericReader`, `AnyReader`, `FixedBufferStream` | Use `std.Io.Reader`/`Writer` | Compile error |
+| `async`/`await` keywords | Use `std.Io.async()` | Compile error |
 | `@fence()` | Stronger atomic orderings or RMW operations | Compile error |
 | `@setCold(true/false)` | `@branchHint(.cold)` | Compile error |
 | `@setAlignStack()` | `callconv(.withStackAlign(...))` | Compile error |
 | `std.BoundedArray` | `ArrayList.initBuffer()` | Compile error |
+| `std.ThreadSafe` allocator | Use ArenaAllocator or SmpAllocator | Compile error |
+| `std.Thread.Pool` | Use `std.Io.concurrent()` | Compile error |
+| `root_source_file` in addExecutable | Use `root_module` | Compile error |
+| `ArrayListUnmanaged` | `ArrayList` (Unmanaged is default) | Compile error |
+| `GenericReader`/`AnyReader`/`FixedBufferStream` | Use `std.Io.Reader`/`Writer` | Compile error |
 
 **Wrong:**
 ```zig
@@ -100,6 +108,51 @@ pub usingnamespace @import("other.zig");
 ```zig
 const other = @import("other.zig");
 pub const foo = other.foo;
+```
+
+**Wrong:**
+```zig
+// OLD: These types were removed in 0.16.0
+var reader: std.io.GenericReader = file.reader(&buf);
+var writer: std.io.AnyWriter = file.writer(&buf);
+var stream: std.io.FixedBufferStream = .{ .buffer = &buf };
+```
+
+**Right:**
+```zig
+// NEW: Use std.Io interface in 0.16.0
+var threaded: std.Io.Threaded = .init(gpa);
+defer threaded.deinit();
+const io = threaded.io();
+```
+
+**Wrong:**
+```zig
+// OLD: ThreadSafe wrapper removed
+var ts = std.heap.ThreadSafe.allocator();
+```
+
+**Right:**
+```zig
+// NEW: ArenaAllocator is now thread-safe
+var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+defer arena.deinit();
+const allocator = arena.allocator();
+```
+
+**Wrong:**
+```zig
+// OLD: ThreadPool removed
+var pool: std.Thread.Pool = .init(...);
+```
+
+**Right:**
+```zig
+// NEW: Use std.Io.concurrent() for parallelism
+var threaded: std.Io.Threaded = .init(gpa);
+defer threaded.deinit();
+const io = threaded.io();
+var task = try io.concurrent(doWork, .{io});
 ```
 
 **Wrong:**
@@ -128,7 +181,7 @@ var stack = std.ArrayList(i32).initBuffer(&buffer);
 try stack.appendSliceBounded(initial);
 ```
 
-### 1.2 Changed Syntax (0.14+)
+### 1.2 Changed Syntax (0.14+) and API Changes (0.16.0)
 
 | Detect | New | Risk |
 |--------|-----|------|
@@ -139,6 +192,10 @@ try stack.appendSliceBounded(initial);
 | Inline asm clobbers `"rcx"` | `.{ .rcx = true }` | Compile error |
 | `callconv(.C)` | `callconv(.c)` | Compile error |
 | `callconv(.Stdcall)` | `callconv(.x86_stdcall)` | Compile error |
+| `writer(&buf)` pattern | Use `std.Io.Reader`/`Writer` | Compile error |
+| `reader(&buf)` pattern | Use `std.Io.Reader`/`Writer` | Compile error |
+| `{f}` format method call | `{f}` specifier still required | Compile error |
+| `DebugAllocator(.{}) = .{}` | `DebugAllocator(.{}) = .init` | Runtime error |
 
 **Wrong:**
 ```zig
@@ -247,7 +304,7 @@ exe.addModule("helper", helper_mod);
 exe.root_module.addImport("helper", helper_mod);
 ```
 
-### 1.4 API Signature Changes
+### 1.4 API Signature Changes (0.16.0)
 
 *Note: For `"{}"` → `"{f}"`, this is a migration check. For new code forgetting `.flush()`, see also [2.2](#22-missing-flush-after-io-write).*
 
@@ -257,20 +314,29 @@ exe.root_module.addImport("helper", helper_mod);
 | `format(self, fmt, opts, writer)` | `format(self, *std.Io.Writer)` | Compile error |
 | `"{}"` for format methods | `"{f}"` | Compile error |
 | `child.collectOutput(&stdout, ...)` | `child.collectOutput(allocator, &stdout, ...)` | Compile error |
+| `file.reader(&buf)` pattern | Use `std.Io.Reader` interface | Compile error |
+| `file.writer(&buf)` pattern | Use `std.Io.Writer` interface | Compile error |
 
-**Wrong:**
-```zig
-const stdout = std.io.getStdOut().writer();
-try stdout.print("Hello\n", .{});
-```
-
-**Right:**
+**Wrong (0.15.x pattern):**
 ```zig
 var buf: [4096]u8 = undefined;
 var stdout_writer = std.fs.File.stdout().writer(&buf);
 const stdout = &stdout_writer.interface;
 try stdout.print("Hello\n", .{});
-try stdout.flush();  // Required
+try stdout.flush();
+```
+
+**Right (0.16.0 pattern):**
+```zig
+// Set up I/O interface
+var threaded: std.Io.Threaded = .init(gpa);
+defer threaded.deinit();
+const io = threaded.io();
+
+// File operations now use std.Io interface
+const file = try std.fs.cwd().createFile("out.txt", .{});
+defer file.close();
+try file.writeAll("Hello\n");
 ```
 
 **Wrong:**
@@ -704,9 +770,9 @@ state.bytes.appendSliceAssumeCapacity(data);
 
 **Verify:** Search for `getOrPut` followed by `ensure` in same scope.
 
-### 2.2 Missing flush() After I/O Write
+### 2.2 Missing flush() After I/O Write (0.15.x Pattern)
 
-*Note: For migrating old `stdout.print()` calls, see also [1.4](#14-api-signature-changes). This section covers new code that forgets `.flush()`.*
+*Note: This section is for legacy 0.15.x code. In 0.16.0, use the `std.Io` interface which handles buffering differently.*
 
 | Detect | `writer(&buf)` or `.writer(&` without subsequent `.flush()` |
 |--------|-------------------------------------------------------------|
@@ -718,7 +784,7 @@ state.bytes.appendSliceAssumeCapacity(data);
 
 **If met:** Add `try writer.interface.flush()` before scope exit.
 
-**Wrong:**
+**Wrong (0.15.x):**
 ```zig
 var buf: [4096]u8 = undefined;
 var writer = file.writer(&buf);
@@ -726,12 +792,24 @@ try writer.interface.print("data", .{});
 // Missing flush
 ```
 
-**Right:**
+**Right (0.15.x):**
 ```zig
 var buf: [4096]u8 = undefined;
 var writer = file.writer(&buf);
 try writer.interface.print("data", .{});
 try writer.interface.flush();
+```
+
+**Recommended (0.16.0):**
+```zig
+// In 0.16.0, use the std.Io interface instead
+var threaded: std.Io.Threaded = .init(gpa);
+defer threaded.deinit();
+const io = threaded.io();
+
+const file = try std.fs.cwd().createFile("out.txt", .{});
+defer file.close();
+try file.writeAll("data");  // No explicit flush needed
 ```
 
 **Verify:** Check for `writer(&` without corresponding `.flush()`.
